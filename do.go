@@ -35,24 +35,23 @@ func (r *Request) prepareContext(parent context.Context) (context.Context, conte
 	return context.WithTimeout(parent, timeout)
 }
 
-func (r *Request) DoRaw(ctx context.Context) (*http.Response, error) {
+func (r *Request) DoRaw(ctx context.Context) (*http.Response, context.CancelFunc, error) {
 	ctx, cancel := r.prepareContext(ctx)
-	defer cancel()
-
 	req, err := r.toRequest(ctx)
 	if err != nil {
-		return nil, err
+		return nil, cancel, err
 	}
 	resp, err := r.cli.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, cancel, err
 	}
-	return resp, nil
+	return resp, cancel, nil
 }
 
 // Do send request
 func (r *Request) Do(ctx context.Context) (*Response, error) {
-	resp, err := r.DoRaw(ctx)
+	resp, cancel, err := r.DoRaw(ctx)
+	defer cancel()
 	if err != nil {
 		return nil, err
 	}

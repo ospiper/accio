@@ -234,7 +234,8 @@ func getByRange(ctx context.Context, req *Request, startByte, endByte int64, out
 		panic("startByte cannot be negative")
 	}
 	req = req.Range(startByte, endByte)
-	resp, err := req.WithoutTimeout().DoRaw(ctx)
+	resp, cancel, err := req.WithoutTimeout().DoRaw(ctx)
+	defer cancel()
 	if err != nil {
 		outChan <- &Chunk{
 			StartByte: startByte,
