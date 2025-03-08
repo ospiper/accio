@@ -57,6 +57,7 @@ func GetConcurrent(ctx context.Context, req *Request, connections int) (*Meta, <
 		out := GetWhole(ctx, req, -1)
 		return meta, out, nil
 	}
+	fmt.Println("getting as a pool")
 	out := GetPool(ctx, req, length, connections)
 	return meta, out, nil
 }
@@ -90,12 +91,15 @@ func GetWhole(ctx context.Context, req *Request, size int64) <-chan *Chunk {
 }
 
 func GetPool(ctx context.Context, req *Request, size int64, connections int) <-chan *Chunk {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
 	if connections > maxConnections {
 		connections = maxConnections
 	}
-	chunkSize := size / int64(connections)
+	var chunkSize int64 = -1
+	if size < 0 {
+		connections = 1
+	} else {
+		chunkSize = size / int64(connections)
+	}
 	fmt.Println("Using connections", connections)
 	fmt.Println("Chunk size", chunkSize)
 	in := make(chan *Chunk, connections*4)
@@ -116,7 +120,6 @@ func GetPool(ctx context.Context, req *Request, size int64, connections int) <-c
 			fmt.Println("[pool reporter] exit")
 			close(in)
 			close(out)
-			cancel()
 			if e := recover(); e != nil {
 				fmt.Println(e)
 				debug.PrintStack()
@@ -127,6 +130,7 @@ func GetPool(ctx context.Context, req *Request, size int64, connections int) <-c
 		for {
 			select {
 			case <-ctx.Done():
+				fmt.Println("pool reporter canceled")
 				return
 			case c, ok := <-inter:
 				if !ok {
@@ -145,7 +149,7 @@ func GetPool(ctx context.Context, req *Request, size int64, connections int) <-c
 					out <- c
 					return // no more retries, in might not be empty but can be discarded, inter might not be empty but can be discarded, out must be stopped
 				} else {
-					fmt.Println("[pool reporter] retry")
+					fmt.Println("[pool reporter] retry", c.Retry)
 					// emit a retry
 					in <- &Chunk{
 						StartByte: c.StartByte,
@@ -165,19 +169,28 @@ func GetPool(ctx context.Context, req *Request, size int64, connections int) <-c
 			}
 		}()
 		fmt.Println("[chunk emitter] start")
-		for start := int64(0); start < size; start += chunkSize + 1 {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				end := start + chunkSize
-				if end >= size {
-					end = size - 1
-				}
-				fmt.Printf("[chunk emitter] start: %d, end: %d\n", start, end)
-				in <- &Chunk{
-					StartByte: start,
-					EndByte:   end,
+		if size < 0 {
+			fmt.Printf("[chunk emitter] start: %d, end: %d\n", 0, -1)
+			in <- &Chunk{
+				StartByte: 0,
+				EndByte:   -1,
+			}
+		} else {
+			for start := int64(0); start < size; start += chunkSize + 1 {
+				select {
+				case <-ctx.Done():
+					fmt.Println("chunk emitter canceled")
+					return
+				default:
+					end := start + chunkSize
+					if end >= size {
+						end = size - 1
+					}
+					fmt.Printf("[chunk emitter] start: %d, end: %d\n", start, end)
+					in <- &Chunk{
+						StartByte: start,
+						EndByte:   end,
+					}
 				}
 			}
 		}
@@ -218,6 +231,7 @@ func runWorker(ctx context.Context, id int, req *Request, wg *sync.WaitGroup, in
 	for {
 		select {
 		case <-ctx.Done():
+			fmt.Println("runWorker canceled")
 			return
 		case t, ok := <-in:
 			if !ok {
@@ -233,7 +247,9 @@ func getByRange(ctx context.Context, req *Request, startByte, endByte int64, out
 	if startByte < 0 {
 		panic("startByte cannot be negative")
 	}
-	req = req.Range(startByte, endByte)
+	if endByte >= 0 {
+		req = req.Range(startByte, endByte)
+	}
 	resp, cancel, err := req.WithoutTimeout().DoRaw(ctx)
 	defer cancel()
 	if err != nil {
@@ -245,15 +261,23 @@ func getByRange(ctx context.Context, req *Request, startByte, endByte int64, out
 		return
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		outChan <- &Chunk{
+			StartByte: startByte,
+			EndByte:   endByte,
+			Error:     fmt.Errorf("status code %d", resp.StatusCode),
+		}
+	}
 	if resp.ContentLength != endByte-startByte+1 {
 		fmt.Printf("Warning: header length not match, req: %d, header: %d\n", endByte-startByte+1, resp.ContentLength)
 	}
 	buf := make([]byte, maxReadBufferSize)
-	var cursor int64
+	cursor := startByte
 	var readSize int
 	for err != io.EOF {
 		select {
 		case <-ctx.Done():
+			fmt.Println("getByRange canceled")
 			outChan <- &Chunk{
 				StartByte: cursor,
 				EndByte:   endByte,
@@ -271,6 +295,7 @@ func getByRange(ctx context.Context, req *Request, startByte, endByte int64, out
 			}
 			break
 		}
+		//fmt.Printf("read offset %d size %d\n", cursor, readSize)
 		currentEnd := cursor + int64(readSize) - 1
 		ret := make([]byte, readSize)
 		copy(ret, buf[:readSize])
