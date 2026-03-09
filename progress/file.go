@@ -12,10 +12,17 @@ type Writer struct {
 	Progress *Bucket
 	w        io.WriterAt
 	tick     *time.Ticker
+	done     chan struct{}
+	once     sync.Once
+	wg       sync.WaitGroup
 }
 
 func (w *Writer) Close() {
-	w.tick.Stop()
+	w.once.Do(func() {
+		close(w.done)
+		w.tick.Stop()
+	})
+	w.wg.Wait()
 }
 
 func (w *Writer) WriteAt(p []byte, off int64) (n int, err error) {
@@ -33,10 +40,18 @@ func NewWriter(w io.WriterAt, size int64) *Writer {
 		}),
 		w:    w,
 		tick: time.NewTicker(time.Millisecond * 100),
+		done: make(chan struct{}),
 	}
+	ret.wg.Add(1)
 	go func() {
-		for range ret.tick.C {
-			ret.Progress.Report(time.Now().UnixMilli(), 0)
+		defer ret.wg.Done()
+		for {
+			select {
+			case <-ret.done:
+				return
+			case <-ret.tick.C:
+				ret.Progress.Report(time.Now().UnixMilli(), 0)
+			}
 		}
 	}()
 
