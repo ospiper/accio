@@ -105,27 +105,24 @@ func GetPool(ctx context.Context, req *Request, size int64, connections int) <-c
 	}
 	fmt.Println("Using connections", connections)
 	fmt.Println("Chunk size", chunkSize)
-	in := make(chan *Chunk, connections*4)
-	retry := make(chan *Chunk, connections*2)
+	noRetry := size <= 0
 	tasks := make(chan *Chunk, connections*4)
-	inter := make(chan *Chunk, connections*2)
+	results := make(chan *Chunk, connections*4)
 	out := make(chan *Chunk, connections*8)
 	poolCtx, cancel := context.WithCancel(ctx)
 	// runWorker workers
 	wg := &sync.WaitGroup{}
 	wg.Add(connections)
 
-	// normal: in -> inter -> out
-	// retry: in -> inter -> retry -> in -> inter -> out
-	// in closes at all task emit for the first time
-	// retry closes at no inter is received
+	// normal: tasks -> results -> out
+	// retry: results(error) -> tasks -> results -> out
+	// tasks closes immediately only when noRetry is true
 	//
 
 	go func() {
 		defer func() {
 			fmt.Println("[pool reporter] exit")
 			cancel()
-			close(retry)
 			close(out)
 			if e := recover(); e != nil {
 				fmt.Println(e)
@@ -133,60 +130,15 @@ func GetPool(ctx context.Context, req *Request, size int64, connections int) <-c
 			}
 		}()
 		fmt.Println("[pool reporter] start")
-		received := int64(0)
-		for {
-			select {
-			case <-poolCtx.Done():
-				fmt.Println("pool reporter canceled")
-				return
-			case c, ok := <-inter:
-				if !ok {
-					return
-				}
-				if c.Error == nil {
-					received += c.EndByte - c.StartByte + 1
-					if !sendChunk(poolCtx, out, c) {
-						return
-					}
-					if size > 0 && received >= size {
-						return // in, inter and out should all be empty now
-					}
-					continue
-				}
-				if c.Retry >= maxRetry {
-					fmt.Println("[pool reporter] max retry exceeded")
-					sendChunk(poolCtx, out, c)
-					return // no more retries, in might not be empty but can be discarded, inter might not be empty but can be discarded, out must be stopped
-				} else {
-					fmt.Println("[pool reporter] retry", c.Retry)
-					// emit a retry
-					if !sendChunk(poolCtx, retry, &Chunk{
-						StartByte: c.StartByte,
-						EndByte:   c.EndByte,
-						Retry:     c.Retry + 1,
-					}) {
-						return
-					}
-				}
-			}
-		}
-	}()
-	go func() {
-		defer func() {
-			fmt.Println("[chunk emitter] exit")
-			close(in)
-			if e := recover(); e != nil {
-				fmt.Println(e)
-				debug.PrintStack()
-			}
-		}()
 		fmt.Println("[chunk emitter] start")
 		if size < 0 {
 			fmt.Printf("[chunk emitter] start: %d, end: %d\n", 0, -1)
-			sendChunk(poolCtx, in, &Chunk{
+			if !sendChunk(poolCtx, tasks, &Chunk{
 				StartByte: 0,
 				EndByte:   -1,
-			})
+			}) {
+				return
+			}
 		} else {
 			for start := int64(0); start < size; start += chunkSize + 1 {
 				select {
@@ -199,7 +151,7 @@ func GetPool(ctx context.Context, req *Request, size int64, connections int) <-c
 						end = size - 1
 					}
 					fmt.Printf("[chunk emitter] start: %d, end: %d\n", start, end)
-					if !sendChunk(poolCtx, in, &Chunk{
+					if !sendChunk(poolCtx, tasks, &Chunk{
 						StartByte: start,
 						EndByte:   end,
 					}) {
@@ -209,37 +161,45 @@ func GetPool(ctx context.Context, req *Request, size int64, connections int) <-c
 			}
 		}
 		fmt.Println("[chunk emitter] all task sent")
-	}()
-	go func() {
-		defer func() {
-			fmt.Println("[task dispatcher] exit")
+		if noRetry {
 			close(tasks)
-			if e := recover(); e != nil {
-				fmt.Println(e)
-				debug.PrintStack()
-			}
-		}()
-		fmt.Println("[task dispatcher] start")
-		var inCh <-chan *Chunk = in
-		var retryCh <-chan *Chunk = retry
-		for inCh != nil || retryCh != nil {
+		}
+		received := int64(0)
+		for {
 			select {
 			case <-poolCtx.Done():
+				fmt.Println("pool reporter canceled")
 				return
-			case c, ok := <-inCh:
+			case c, ok := <-results:
 				if !ok {
-					inCh = nil
-					continue
-				}
-				if !sendChunk(poolCtx, tasks, c) {
 					return
 				}
-			case c, ok := <-retryCh:
-				if !ok {
-					retryCh = nil
+				if c.Error == nil {
+					received += c.EndByte - c.StartByte + 1
+					if !sendChunk(poolCtx, out, c) {
+						return
+					}
+					if size > 0 && received >= size {
+						return // tasks and results should be empty now
+					}
 					continue
 				}
-				if !sendChunk(poolCtx, tasks, c) {
+				if noRetry {
+					sendChunk(poolCtx, out, c)
+					return
+				}
+				if c.Retry >= maxRetry {
+					fmt.Println("[pool reporter] max retry exceeded")
+					sendChunk(poolCtx, out, c)
+					return // no more retries, tasks might not be empty but can be discarded, out must be stopped
+				}
+				fmt.Println("[pool reporter] retry", c.Retry)
+				// emit a retry
+				if !sendChunk(poolCtx, tasks, &Chunk{
+					StartByte: c.StartByte,
+					EndByte:   c.EndByte,
+					Retry:     c.Retry + 1,
+				}) {
 					return
 				}
 			}
@@ -249,7 +209,7 @@ func GetPool(ctx context.Context, req *Request, size int64, connections int) <-c
 	go func() {
 		defer func() {
 			fmt.Println("[pool watcher] exit")
-			close(inter)
+			close(results)
 			if e := recover(); e != nil {
 				fmt.Println(e)
 				debug.PrintStack()
@@ -261,7 +221,7 @@ func GetPool(ctx context.Context, req *Request, size int64, connections int) <-c
 
 	// run workers
 	for i := 0; i < connections; i++ {
-		go runWorker(poolCtx, i, req, wg, tasks, inter)
+		go runWorker(poolCtx, i, req, wg, tasks, results)
 	}
 
 	return out

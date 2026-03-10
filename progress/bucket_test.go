@@ -27,6 +27,14 @@ func TestSimulatedBucket(t *testing.T) {
 	assert.Equal(t, []int64{1, 3, 6, 10, 15, 21, 28, 36, 45, 55, 65, 75, 85, 95, 105, 115, 125, 135, 145, 155}, collected)
 }
 
+func TestBucketZeroSizeNoop(t *testing.T) {
+	bucket := New(0, AsIs)
+	for i := int64(0); i < 10; i++ {
+		bucket.Report(i, i+1)
+	}
+	assert.Equal(t, int64(0), bucket.Collect())
+}
+
 func consumeChan[T any](ctx context.Context, ch <-chan T, h func(ctx context.Context, t T)) {
 	for {
 		select {

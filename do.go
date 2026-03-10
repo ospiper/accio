@@ -17,6 +17,12 @@ func (r *Request) toRequest(ctx context.Context) (*http.Request, error) {
 		return nil, err
 	}
 
+	if r.auth != nil {
+		if err := r.auth.Apply(req); err != nil {
+			return nil, err
+		}
+	}
+
 	for k, v := range r.header {
 		req.Header.Set(k, v)
 	}
@@ -36,6 +42,9 @@ func (r *Request) prepareContext(parent context.Context) (context.Context, conte
 }
 
 func (r *Request) DoRaw(ctx context.Context) (*http.Response, context.CancelFunc, error) {
+	if r.err != nil {
+		return nil, func() {}, r.err
+	}
 	ctx, cancel := r.prepareContext(ctx)
 	req, err := r.toRequest(ctx)
 	if err != nil {

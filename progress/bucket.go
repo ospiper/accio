@@ -29,6 +29,9 @@ func (b *Bucket) Size() int {
 func (b *Bucket) Report(in int64, inc int64) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if len(b.bs) == 0 {
+		return
+	}
 	var h int64
 	if b.hashFn != nil {
 		h = b.hashFn(in)

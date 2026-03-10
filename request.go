@@ -24,6 +24,8 @@ type Request struct {
 	timeout time.Duration
 
 	auth AuthProvider
+
+	err error
 }
 
 // initializers
@@ -118,12 +120,19 @@ func (r *Request) Options(url string) *Request {
 func (r *Request) Body(b []byte) *Request {
 	ret := r.copyOnDemand()
 	ret.body = b
+	ret.err = nil
 	return ret
 }
 
 func (r *Request) BodyJSON(v any) *Request {
 	ret := r.copyOnDemand()
-	ret.body, _ = jsonMarshal(v)
+	body, err := jsonMarshal(v)
+	if err != nil {
+		ret.err = err
+		return ret
+	}
+	ret.body = body
+	ret.err = nil
 	return ret
 }
 
@@ -134,6 +143,7 @@ func (r *Request) Header(kvs ...string) *Request {
 		return r
 	}
 	ret := r.copyOnDemand()
+	ensureHeader(ret)
 	if len(kvs)%2 != 0 {
 		kvs = append(kvs, "")
 	}
@@ -161,8 +171,15 @@ func (r *Request) Auth(auth AuthProvider) *Request {
 
 func (r *Request) Range(start, end int64) *Request {
 	ret := r.copyOnDemand()
+	ensureHeader(ret)
 	ret.header["Range"] = fmt.Sprintf("bytes=%d-%d", start, end)
 	return ret
+}
+
+func ensureHeader(r *Request) {
+	if r.header == nil {
+		r.header = make(map[string]string)
+	}
 }
 
 // functional info

@@ -187,3 +187,33 @@ func TestGetByRangeStatusErrorNoData(t *testing.T) {
 		t.Fatalf("expected no data chunks when status is error, got %d", dataCount)
 	}
 }
+
+func TestGetPoolUnknownSizeNoDeadlock(t *testing.T) {
+	data := make([]byte, 64*1024)
+	s := newRangeServer(t, data, "", false)
+	defer s.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	out := GetPool(ctx, New().Get(s.URL), -1, 2)
+
+	received := 0
+	for {
+		select {
+		case <-ctx.Done():
+			t.Fatalf("timeout waiting for GetPool to close: %v", ctx.Err())
+		case c, ok := <-out:
+			if !ok {
+				if received == 0 {
+					t.Fatal("expected to receive data chunks")
+				}
+				return
+			}
+			if c.Error != nil {
+				t.Fatalf("unexpected error chunk: %v", c.Error)
+			}
+			received += len(c.Data)
+		}
+	}
+}
